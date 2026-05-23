@@ -66,6 +66,7 @@ public class FuseMapApp {
         toolbar.setFloatable(false);
         JButton connectAll = new JButton("Connect all");
         JButton blowAll = new JButton("Disconnect all");
+        JButton clearNets = new JButton("Clear connect points");
         connectAll.addActionListener(e -> {
             map.setAll(true);
             grid.repaint();
@@ -76,11 +77,17 @@ public class FuseMapApp {
             grid.repaint();
             refreshCounter.run();
         });
+        clearNets.addActionListener(e -> {
+            grid.getWireGraph().clear();
+            grid.repaint();
+        });
         JLabel hint = new JLabel(
-                "Click any crossing to toggle the fuse. Dot = connected (intact), empty = disconnected (blown).");
+                "Left-click: highlight net (and toggle the fuse if you hit one) \u2022 click a colored dot to remove it");
         hint.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 0));
         toolbar.add(connectAll);
         toolbar.add(blowAll);
+        toolbar.addSeparator();
+        toolbar.add(clearNets);
         toolbar.addSeparator();
         toolbar.add(hint);
 

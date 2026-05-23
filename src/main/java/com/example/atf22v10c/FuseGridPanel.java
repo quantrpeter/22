@@ -14,9 +14,12 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.Polygon;
 import java.awt.RenderingHints;
+import java.awt.Stroke;
 import java.awt.event.MouseEvent;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.GeneralPath;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -67,7 +70,6 @@ public class FuseGridPanel extends JPanel {
     private static final Color PT_LINE_COLOR     = new Color(60, 60, 60);
     private static final Color INPUT_LINE_COLOR  = new Color(60, 60, 60);
     private static final Color INTACT_COLOR      = new Color(20, 20, 20);
-    private static final Color HOVER_COLOR       = new Color(0, 120, 215, 160);
     private static final Color OE_BG             = new Color(255, 244, 215);
     private static final Color AR_SP_BG          = new Color(232, 244, 255);
     private static final Color BLOCK_SEPARATOR   = new Color(160, 160, 160);
@@ -76,6 +78,7 @@ public class FuseGridPanel extends JPanel {
     private static final Color CLK_COLOR         = new Color(30, 100, 200);
 
     private final FuseMap map;
+    private final WireGraph wireGraph;
     private int hoverRow = -1;
     private int hoverCol = -1;
     private Consumer<String> statusListener = s -> {};
@@ -90,6 +93,8 @@ public class FuseGridPanel extends JPanel {
                 TOTAL_WIDTH,
                 ROW_OFFSET + map.rowCount() * CELL + CELL));
 
+        this.wireGraph = new WireGraph(enumerateWireSegments());
+
         MouseInputAdapter mouse = new MouseInputAdapter() {
             @Override public void mouseMoved(MouseEvent e)   { updateHover(e); }
             @Override public void mouseDragged(MouseEvent e) { updateHover(e); }
@@ -99,18 +104,51 @@ public class FuseGridPanel extends JPanel {
                 statusListener.accept(" ");
             }
             @Override public void mousePressed(MouseEvent e) {
-                if (!SwingUtilities.isLeftMouseButton(e)) return;
-                int r = rowAt(e.getY());
-                int c = colAt(e.getX());
-                if (r < 0 || c < 0) return;
-                boolean nowIntact = map.toggle(r, c);
-                statusListener.accept(describe(r, c) + " -> "
-                        + (nowIntact ? "CONNECTED" : "disconnected"));
-                repaint(cellBounds(r, c));
+                boolean isLeft  = SwingUtilities.isLeftMouseButton(e);
+                boolean isRight = SwingUtilities.isRightMouseButton(e);
+                if (!isLeft && !isRight) return;
+
+                int x = e.getX(), y = e.getY();
+
+                // 1) clicking an existing connect point removes it (either button)
+                if (wireGraph.removeJunctionNear(x, y)) {
+                    statusListener.accept("removed connect point");
+                    repaint();
+                    return;
+                }
+
+                // 2) try to highlight: drop a connect point on any wire under the cursor
+                boolean highlighted = wireGraph.addJunction(x, y);
+
+                // 3) left-click on a fuse cell also toggles that fuse
+                if (isLeft) {
+                    int r = rowAt(y), c = colAt(x);
+                    if (r >= 0 && c >= 0) {
+                        boolean nowIntact = map.toggle(r, c);
+                        String msg = describe(r, c) + " -> "
+                                + (nowIntact ? "CONNECTED" : "disconnected");
+                        if (highlighted) msg += "   [+ highlight]";
+                        statusListener.accept(msg);
+                        repaint();
+                        return;
+                    }
+                }
+
+                if (highlighted) {
+                    statusListener.accept("connect point added ("
+                            + wireGraph.junctions().size() + " total)");
+                } else {
+                    statusListener.accept("no wire under cursor");
+                }
+                repaint();
             }
         };
         addMouseListener(mouse);
         addMouseMotionListener(mouse);
+    }
+
+    public WireGraph getWireGraph() {
+        return wireGraph;
     }
 
     public void setStatusListener(Consumer<String> l) {
@@ -151,17 +189,18 @@ public class FuseGridPanel extends JPanel {
     }
 
     int rowAt(int py) {
-        int y = py - ROW_OFFSET;
-        if (y < 0) return -1;
-        int r = y / CELL;
+        // Map the click to the NEAREST row line, treating each row's hit area
+        // as the half-cell either side of its line (so a click on the fuse
+        // visually lands on the toggled fuse, not the cell above-left).
+        if (py < ROW_OFFSET - CELL / 2) return -1;
+        int r = (py - ROW_OFFSET + CELL / 2) / CELL;
         if (r >= map.rowCount()) return -1;
         return r;
     }
 
     int colAt(int px) {
-        int x = px - COL_OFFSET;
-        if (x < 0) return -1;
-        int c = x / CELL;
+        if (px < COL_OFFSET - CELL / 2) return -1;
+        int c = (px - COL_OFFSET + CELL / 2) / CELL;
         if (c >= FuseMap.NUM_COLUMNS) return -1;
         return c;
     }
@@ -196,7 +235,7 @@ public class FuseGridPanel extends JPanel {
             paintAsynchTrunk(g);
             paintClockBus(g);
             paintBlockSeparators(g);
-            paintHover(g);
+            paintNetHighlights(g);
         } finally {
             g.dispose();
         }
@@ -275,16 +314,6 @@ public class FuseGridPanel extends JPanel {
             }
             prevKind = ri.kind;
         }
-    }
-
-    private void paintHover(Graphics2D g) {
-        if (hoverRow < 0 || hoverCol < 0) return;
-        int x = COL_OFFSET + hoverCol * CELL;
-        int y = ROW_OFFSET + hoverRow * CELL;
-        g.setColor(HOVER_COLOR);
-        g.setStroke(new BasicStroke(1.5f));
-        int s = DOT_DIAMETER + 6;
-        g.drawOval(x - s / 2, y - s / 2, s, s);
     }
 
     /* -------------------------- output-area painting -------------------------- */
@@ -508,6 +537,132 @@ public class FuseGridPanel extends JPanel {
         p.quadTo(x + w * 0.18, y + h / 2.0, x, y);
         p.closePath();
         return p;
+    }
+
+    /* -------------------- net highlighting / connect points -------------------- */
+
+    private void paintNetHighlights(Graphics2D g) {
+        if (wireGraph == null) return;
+
+        Stroke saved = g.getStroke();
+        g.setStroke(new BasicStroke(2.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        for (int i = 0; i < wireGraph.segmentCount(); i++) {
+            Color c = wireGraph.colorOf(i);
+            if (c == null) continue;
+            WireGraph.Seg s = wireGraph.segment(i);
+            g.setColor(c);
+            g.drawLine(s.x1(), s.y1(), s.x2(), s.y2());
+        }
+        g.setStroke(saved);
+    }
+
+    /**
+     * Mirror of the geometry inside the various {@code paint*} methods, but
+     * collected as a list of (x1,y1,x2,y2) line segments for {@link WireGraph}.
+     * Any time the layout constants change, both this and the matching painter
+     * must be updated together.
+     */
+    private List<WireGraph.Seg> enumerateWireSegments() {
+        List<WireGraph.Seg> segs = new ArrayList<>();
+
+        int colTop = 0;
+        int colBot = ROW_OFFSET + map.rowCount() * CELL - CELL / 2;
+        for (int c = 0; c < FuseMap.NUM_COLUMNS; c++) {
+            int x = COL_OFFSET + c * CELL;
+            segs.add(new WireGraph.Seg(x, colTop, x, colBot));
+        }
+
+        int xL = COL_OFFSET;
+        for (int r = 0; r < map.rowCount(); r++) {
+            RowInfo ri = map.row(r);
+            int y = ROW_OFFSET + r * CELL;
+            int xR = switch (ri.kind) {
+                case PT -> GATE_LEFT + (int) (GATE_W * 0.18);
+                case OE -> OUTPUT_AREA_X + 14 + 12;
+                default -> OUTPUT_AREA_X;
+            };
+            segs.add(new WireGraph.Seg(xL, y, xR, y));
+        }
+
+        int firstPtRow = -1;
+        int currentMacro = -1;
+        for (int r = 0; r < map.rowCount(); r++) {
+            RowInfo ri = map.row(r);
+            if (ri.kind == RowKind.PT && ri.ptIndex == 0) {
+                firstPtRow = r;
+                currentMacro = ri.macrocell;
+            } else if (ri.kind == RowKind.OE && firstPtRow >= 0) {
+                enumerateMacrocellSegments(segs, currentMacro, firstPtRow, r - 1, r);
+                firstPtRow = -1;
+                currentMacro = -1;
+            }
+        }
+
+        int pin1CenterX = COL_OFFSET + CELL / 2;
+        segs.add(new WireGraph.Seg(pin1CenterX, 0, pin1CenterX, CLK_BUS_Y));
+        segs.add(new WireGraph.Seg(pin1CenterX, CLK_BUS_Y, CLK_TRUNK_X, CLK_BUS_Y));
+        int clkTrunkBot = ROW_OFFSET + (map.rowCount() - 2) * CELL;
+        segs.add(new WireGraph.Seg(CLK_TRUNK_X, CLK_BUS_Y, CLK_TRUNK_X, clkTrunkBot));
+
+        segs.add(new WireGraph.Seg(OUTPUT_AREA_X, ROW_OFFSET, OUTPUT_AREA_X, ASYNCH_Y_OFFSET));
+        segs.add(new WireGraph.Seg(OUTPUT_AREA_X, ASYNCH_Y_OFFSET, TOTAL_WIDTH - 2, ASYNCH_Y_OFFSET));
+
+        return segs;
+    }
+
+    private void enumerateMacrocellSegments(List<WireGraph.Seg> segs,
+                                            int macro,
+                                            int firstPtRow,
+                                            int lastPtRow,
+                                            int oeRow) {
+        int yFirst = ROW_OFFSET + firstPtRow * CELL;
+        int yLast  = ROW_OFFSET + lastPtRow  * CELL;
+        int yOE    = ROW_OFFSET + oeRow      * CELL;
+        int midY   = (yFirst + yLast) / 2;
+
+        int gateTop = yFirst - CELL / 2 + 1;
+        int gateBot = yLast  + CELL / 2 - 1;
+        int gateH   = gateBot - gateTop;
+        int logicH  = Math.max(36, gateH * 7 / 10);
+        int logicY  = midY - logicH / 2;
+
+        segs.add(new WireGraph.Seg(GATE_RIGHT, midY, LOGIC_X, midY));
+        segs.add(new WireGraph.Seg(LOGIC_RIGHT, midY, TRI_X, midY));
+        segs.add(new WireGraph.Seg(TRI_RIGHT, midY, TOTAL_WIDTH - 2, midY));
+
+        int invX = OUTPUT_AREA_X + 14;
+        int invW = 12;
+        int bub  = 4;
+        int invOutX = invX + invW + bub;
+        int routeX  = LOGIC_X - 6;
+        int routeY  = logicY + logicH + 6;
+        int triEnX  = TRI_X + TRI_SIZE / 2;
+
+        segs.add(new WireGraph.Seg(invOutX, yOE, routeX, yOE));
+        segs.add(new WireGraph.Seg(routeX, yOE, routeX, routeY));
+        segs.add(new WireGraph.Seg(routeX, routeY, triEnX, routeY));
+        segs.add(new WireGraph.Seg(triEnX, routeY, triEnX, midY + TRI_SIZE / 2));
+
+        int clkY = logicY + logicH - 8;
+        segs.add(new WireGraph.Seg(CLK_TRUNK_X, clkY, LOGIC_X, clkY));
+
+        int trunkX  = TRI_RIGHT + 6 + macro * 2;
+        int channelY = 10 + macro * 6;
+        int trueCol = 24 + macro * 2;
+        int compCol = trueCol + 1;
+        int trueX   = COL_OFFSET + trueCol * CELL;
+        int compX   = COL_OFFSET + compCol * CELL;
+        int midX    = (trueX + compX) / 2;
+        int splitY  = channelY - 5;
+        int bubY    = splitY - bub - 1;
+
+        segs.add(new WireGraph.Seg(trunkX, midY, trunkX, channelY));
+        segs.add(new WireGraph.Seg(midX, channelY, trunkX, channelY));
+        segs.add(new WireGraph.Seg(midX, channelY, midX, splitY));
+        segs.add(new WireGraph.Seg(trueX, splitY, compX, splitY));
+        segs.add(new WireGraph.Seg(trueX, splitY, trueX, 0));
+        segs.add(new WireGraph.Seg(compX, splitY, compX, bubY + bub));
+        segs.add(new WireGraph.Seg(compX, bubY, compX, 0));
     }
 
     private static void drawCenteredMultiline(Graphics2D g, String text, int cx, int cy) {
