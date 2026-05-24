@@ -25,9 +25,11 @@ import java.util.function.Consumer;
 /**
  * Single all-in-one panel that draws:
  *   - The clickable AND-array fuse grid (132 PT rows x 44 input columns).
+ *   - A per-row AND gate symbol immediately to the right of the array,
+ *     visually marking every row as a wide AND of its selected inputs.
  *   - The macrocell output area on the right: OR gate, OE inverter,
- *     OUTPUT LOGIC block, tri-state output buffer, feedback tap and ASYNCH
- *     trunk.
+ *     OUTPUT LOGIC block, tri-state output buffer, I/O pin pad, feedback
+ *     tap and ASYNCH trunk.
  *
  * Coordinates:
  *   x(col)  = COL_OFFSET + col * CELL
@@ -35,6 +37,16 @@ import java.util.function.Consumer;
  *
  * The output area lives entirely to the right of the array (x >= OUTPUT_AREA_X)
  * and is purely decorative — clicks there are ignored.
+ *
+ * Important device notes:
+ *   - Every input to the AND array is a dedicated input pin; there is no
+ *     separate "macrocell feedback" category. Inputs 1..10 are the same
+ *     physical pins that each macrocell's tri-state output drives, so the
+ *     feedback wire is drawn as a green path from the macrocell output
+ *     back up to the TOP of the matching input buffer's pin stem in
+ *     InputStrip (no extra column, no extra buffer).
+ *   - Column layout (left -> right): input k uses columns 2k (true) and
+ *     2k+1 (complement). Pin 1 (k=0) doubles as the global CLK.
  */
 public class FuseGridPanel extends JPanel {
 
@@ -50,8 +62,16 @@ public class FuseGridPanel extends JPanel {
     static final int OUTPUT_AREA_X     = COL_OFFSET + FuseMap.NUM_COLUMNS * CELL;
     static final int TOTAL_WIDTH       = OUTPUT_AREA_X + OUTPUT_AREA_WIDTH;
 
+    /* Per-row AND gate (small D-shape) that visually marks each row in the
+     * AND array as a wide AND of its selected input columns. Sits in a
+     * narrow band immediately right of the fuse array, before the OR gate. */
+    private static final int AND_W       = 14;
+    private static final int AND_H       = 9;
+    private static final int AND_LEFT    = OUTPUT_AREA_X + 2;
+    private static final int AND_RIGHT   = AND_LEFT + AND_W;
+
     /* Per-macrocell output layout (absolute X coordinates, computed from OUTPUT_AREA_X). */
-    private static final int GATE_LEFT   = OUTPUT_AREA_X + 6;
+    private static final int GATE_LEFT   = AND_RIGHT + 4;
     private static final int GATE_W      = 38;
     private static final int GATE_RIGHT  = GATE_LEFT + GATE_W;
     private static final int LOGIC_X     = GATE_RIGHT + 18;
@@ -61,11 +81,24 @@ public class FuseGridPanel extends JPanel {
     private static final int TRI_SIZE    = 18;
     private static final int TRI_RIGHT   = TRI_X + TRI_SIZE;
 
+    /* OE inverter sits at OE-row Y, just right of the per-row AND gate. It is
+     * aligned with the OR gate's left edge so the OE column lines up nicely
+     * with the OR gate above. */
+    private static final int OE_INV_X    = GATE_LEFT;
+    private static final int OE_INV_W    = 12;
+    private static final int OE_INV_H    = 10;
+    private static final int OE_INV_BUB  = 4;
+
     private static final int ASYNCH_Y_OFFSET = 4;
     /** Y of the global CLK bus inside the top channel, just above the AR row. */
     private static final int CLK_BUS_Y = 76;
     /** X of the vertical CLK trunk that serves every macrocell (left of OUTPUT LOGIC). */
     private static final int CLK_TRUNK_X = LOGIC_X - 12;
+
+    /** Width / height of the small square that visually represents an I/O pin pad. */
+    private static final int IO_PIN_PAD_SIZE = 8;
+    /** X of the centre of the I/O pin pad drawn at the right edge of the chip. */
+    private static final int IO_PIN_PAD_CX = TOTAL_WIDTH - 10;
 
     private static final Color PT_LINE_COLOR     = new Color(60, 60, 60);
     private static final Color INPUT_LINE_COLOR  = new Color(60, 60, 60);
@@ -274,13 +307,33 @@ public class FuseGridPanel extends JPanel {
         for (int r = rStart; r <= rEnd; r++) {
             RowInfo ri = map.row(r);
             int y = ROW_OFFSET + r * CELL;
+
+            // (1) row line from the fuse array up to the AND gate's input.
+            g.drawLine(xL, y, AND_LEFT, y);
+
+            // (2) the per-row AND gate symbol (every product-term row in the
+            //     array is a wide AND of its selected inputs).
+            drawAndGate(g, AND_LEFT, y, AND_W, AND_H);
+
+            // (3) AND-gate output continues to the next stage for this row.
             int xR = switch (ri.kind) {
                 case PT -> GATE_LEFT + (int) (GATE_W * 0.18);
-                case OE -> OUTPUT_AREA_X + 14 + 12;
-                default -> OUTPUT_AREA_X;
+                case OE -> OE_INV_X + OE_INV_W;
+                default -> AND_RIGHT;
             };
-            g.drawLine(xL, y, xR, y);
+            g.drawLine(AND_RIGHT, y, xR, y);
         }
+    }
+
+    private static void drawAndGate(Graphics2D g, int x, int y, int w, int h) {
+        double r = h / 2.0;
+        double sx = x + w - r;
+        g.draw(new java.awt.geom.Line2D.Double(x, y - r, x, y + r));
+        g.draw(new java.awt.geom.Line2D.Double(x, y - r, sx, y - r));
+        g.draw(new java.awt.geom.Line2D.Double(x, y + r, sx, y + r));
+        g.draw(new java.awt.geom.Arc2D.Double(
+                sx - r, y - r, 2 * r, 2 * r,
+                90, -180, java.awt.geom.Arc2D.OPEN));
     }
 
     private void paintFuses(Graphics2D g, int rStart, int rEnd) {
@@ -348,27 +401,28 @@ public class FuseGridPanel extends JPanel {
 
         int y = ASYNCH_Y_OFFSET;
         int arY = ROW_OFFSET;
+        int dropX = AND_RIGHT;
 
-        g.drawLine(OUTPUT_AREA_X, arY, OUTPUT_AREA_X, y);
-        g.fillOval(OUTPUT_AREA_X - 2, arY - 2, 4, 4);
+        g.drawLine(dropX, arY, dropX, y);
+        g.fillOval(dropX - 2, arY - 2, 4, 4);
 
-        g.drawLine(OUTPUT_AREA_X, y, TOTAL_WIDTH - 2, y);
+        g.drawLine(dropX, y, TOTAL_WIDTH - 2, y);
 
         g.setFont(getFont().deriveFont(java.awt.Font.BOLD, 11f));
         g.drawString("ASYNCH", TRI_X - 44, y + 10);
     }
 
     /**
-     * Global clock bus: pin 1 (DIP1 / SMT2) drives the CLK input of every
-     * output macrocell. The bus is drawn as:
-     *   - a vertical drop at pin 1's center X from the top of the panel
+     * Global clock bus: pin 1 (the first input pin) drives the CLK input of
+     * every output macrocell. The bus is drawn as:
+     *   - a vertical drop at pin 1's centre X from the top of the panel
      *     down to the horizontal CLK bus,
      *   - the horizontal bus across the array to the CLK trunk,
      *   - a vertical CLK trunk running through every macrocell row, with a
      *     short branch and ">" port drawn per macrocell by drawClockPort.
      */
     private void paintClockBus(Graphics2D g) {
-        int pin1CenterX = COL_OFFSET + CELL / 2;
+        int pin1CenterX = InputStrip.centerXOfInput(0);
 
         g.setColor(CLK_COLOR);
         g.setStroke(new BasicStroke(1.2f));
@@ -412,11 +466,11 @@ public class FuseGridPanel extends JPanel {
         int sw = g.getFontMetrics().stringWidth(pts);
         g.drawString(pts, GATE_LEFT + GATE_W * 5 / 12 - sw / 2 + 2, midY + 4);
 
-        int invX = OUTPUT_AREA_X + 14;
-        int invW = 12;
-        int invH = 10;
+        int invX = OE_INV_X;
+        int invW = OE_INV_W;
+        int invH = OE_INV_H;
         int invY = yOE;
-        int bub  = 4;
+        int bub  = OE_INV_BUB;
 
         g.setStroke(new BasicStroke(1f));
         Polygon inv = new Polygon(
@@ -443,7 +497,7 @@ public class FuseGridPanel extends JPanel {
         g.draw(tri);
 
         g.drawLine(LOGIC_RIGHT, midY, TRI_X, midY);
-        g.drawLine(TRI_RIGHT, midY, TOTAL_WIDTH - 2, midY);
+        g.drawLine(TRI_RIGHT, midY, IO_PIN_PAD_CX, midY);
 
         int invOutX = invX + invW + bub;
         int routeX  = LOGIC_X - 6;
@@ -457,7 +511,29 @@ public class FuseGridPanel extends JPanel {
 
         drawClockPort(g, logicY, logicH);
 
+        drawIoPinPad(g, macro, midY);
+
         drawFeedbackWire(g, macro, midY);
+    }
+
+    /**
+     * Draws the I/O pin pad at the right edge of the macrocell output and
+     * labels it with the pin number that this macrocell drives. Pin N is the
+     * SAME physical pin shown as input pin N in InputStrip, which is why
+     * the green feedback wire loops back to that input buffer.
+     */
+    private void drawIoPinPad(Graphics2D g, int macro, int midY) {
+        int x = IO_PIN_PAD_CX;
+        int half = IO_PIN_PAD_SIZE / 2;
+
+        g.setColor(GATE_LINE);
+        g.setStroke(new BasicStroke(1f));
+        g.drawRect(x - half, midY - half, IO_PIN_PAD_SIZE, IO_PIN_PAD_SIZE);
+
+        g.setFont(getFont().deriveFont(java.awt.Font.BOLD, 9f));
+        String label = "pin " + (macro + 1);
+        int lw = g.getFontMetrics().stringWidth(label);
+        g.drawString(label, x - lw / 2, midY - half - 3);
     }
 
     /**
@@ -478,50 +554,37 @@ public class FuseGridPanel extends JPanel {
     }
 
     /**
-     * Route a feedback wire from the macrocell's I/O pin back into the AND
-     * array as the two Q{n} feedback columns (true + complement).
+     * Route a feedback wire from the macrocell's I/O pin back to the matching
+     * input pin buffer in InputStrip. Because the I/O pin and input pin N
+     * are the SAME physical pin, this wire is just the chip-internal trace
+     * carrying that pin's signal — no fan-out or inverter is drawn here;
+     * the regular input buffer in InputStrip handles true/complement
+     * splitting exactly once.
      *
      * Routing:
-     *   1. Tap the OUT trace just right of the tri-state buffer.
-     *   2. Vertical trunk on the far right of the panel (staggered X per macrocell).
+     *   1. Tap the I/O pin pad.
+     *   2. Short stub to a staggered vertical trunk on the far right.
      *   3. Horizontal channel across the reserved TOP_CHANNEL area
      *      (staggered Y per macrocell).
-     *   4. A small inverter-bubble split that drops INTO column 2k (true)
-     *      and column 2k+1 (complement), where k = 12 + macrocell index.
+     *   4. Vertical drop down to the top of input pin (macro)'s stem.
      */
     private void drawFeedbackWire(Graphics2D g, int macro, int midY) {
-        int trunkX  = TRI_RIGHT + 6 + macro * 2;
+        int trunkX   = IO_PIN_PAD_CX - 4 - macro * 2;
         int channelY = 10 + macro * 6;
-
-        int trueCol = 24 + macro * 2;
-        int compCol = trueCol + 1;
-        int trueX = COL_OFFSET + trueCol * CELL;
-        int compX = COL_OFFSET + compCol * CELL;
-        int midX  = (trueX + compX) / 2;
+        int stemX    = InputStrip.stemXOfInput(macro);
 
         g.setColor(FEEDBACK_COLOR);
         g.setStroke(new BasicStroke(1.2f));
 
-        g.fillOval(trunkX - 2, midY - 2, 4, 4);
+        g.fillOval(IO_PIN_PAD_CX - 2, midY - 2, 4, 4);
+        g.drawLine(IO_PIN_PAD_CX, midY, trunkX, midY);
 
         g.drawLine(trunkX, midY, trunkX, channelY);
-        g.drawLine(midX, channelY, trunkX, channelY);
-
-        int splitY = channelY - 5;
-        g.drawLine(midX, channelY, midX, splitY);
-        g.drawLine(trueX, splitY, compX, splitY);
-
-        g.drawLine(trueX, splitY, trueX, 0);
-
-        int bub = 4;
-        int bubY = splitY - bub - 1;
-        g.drawLine(compX, splitY, compX, bubY + bub);
-        g.draw(new java.awt.geom.Ellipse2D.Double(
-                compX - bub / 2.0, bubY, bub, bub));
-        g.drawLine(compX, bubY, compX, 0);
+        g.drawLine(trunkX, channelY, stemX, channelY);
+        g.drawLine(stemX, channelY, stemX, 0);
 
         g.setFont(getFont().deriveFont(java.awt.Font.PLAIN, 8f));
-        g.drawString("Q" + (macro + 1), midX + 4, channelY - 1);
+        g.drawString("to pin " + (macro + 1), stemX + 4, channelY - 1);
     }
 
     private static GeneralPath orGatePath(int x, int y, int w, int h) {
@@ -578,10 +641,11 @@ public class FuseGridPanel extends JPanel {
             int y = ROW_OFFSET + r * CELL;
             int xR = switch (ri.kind) {
                 case PT -> GATE_LEFT + (int) (GATE_W * 0.18);
-                case OE -> OUTPUT_AREA_X + 14 + 12;
-                default -> OUTPUT_AREA_X;
+                case OE -> OE_INV_X + OE_INV_W;
+                default -> AND_RIGHT;
             };
-            segs.add(new WireGraph.Seg(xL, y, xR, y));
+            segs.add(new WireGraph.Seg(xL, y, AND_LEFT, y));
+            segs.add(new WireGraph.Seg(AND_RIGHT, y, xR, y));
         }
 
         int firstPtRow = -1;
@@ -598,14 +662,14 @@ public class FuseGridPanel extends JPanel {
             }
         }
 
-        int pin1CenterX = COL_OFFSET + CELL / 2;
+        int pin1CenterX = InputStrip.centerXOfInput(0);
         segs.add(new WireGraph.Seg(pin1CenterX, 0, pin1CenterX, CLK_BUS_Y));
         segs.add(new WireGraph.Seg(pin1CenterX, CLK_BUS_Y, CLK_TRUNK_X, CLK_BUS_Y));
         int clkTrunkBot = ROW_OFFSET + (map.rowCount() - 2) * CELL;
         segs.add(new WireGraph.Seg(CLK_TRUNK_X, CLK_BUS_Y, CLK_TRUNK_X, clkTrunkBot));
 
-        segs.add(new WireGraph.Seg(OUTPUT_AREA_X, ROW_OFFSET, OUTPUT_AREA_X, ASYNCH_Y_OFFSET));
-        segs.add(new WireGraph.Seg(OUTPUT_AREA_X, ASYNCH_Y_OFFSET, TOTAL_WIDTH - 2, ASYNCH_Y_OFFSET));
+        segs.add(new WireGraph.Seg(AND_RIGHT, ROW_OFFSET, AND_RIGHT, ASYNCH_Y_OFFSET));
+        segs.add(new WireGraph.Seg(AND_RIGHT, ASYNCH_Y_OFFSET, TOTAL_WIDTH - 2, ASYNCH_Y_OFFSET));
 
         return segs;
     }
@@ -628,11 +692,11 @@ public class FuseGridPanel extends JPanel {
 
         segs.add(new WireGraph.Seg(GATE_RIGHT, midY, LOGIC_X, midY));
         segs.add(new WireGraph.Seg(LOGIC_RIGHT, midY, TRI_X, midY));
-        segs.add(new WireGraph.Seg(TRI_RIGHT, midY, TOTAL_WIDTH - 2, midY));
+        segs.add(new WireGraph.Seg(TRI_RIGHT, midY, IO_PIN_PAD_CX, midY));
 
-        int invX = OUTPUT_AREA_X + 14;
-        int invW = 12;
-        int bub  = 4;
+        int invX = OE_INV_X;
+        int invW = OE_INV_W;
+        int bub  = OE_INV_BUB;
         int invOutX = invX + invW + bub;
         int routeX  = LOGIC_X - 6;
         int routeY  = logicY + logicH + 6;
@@ -646,23 +710,14 @@ public class FuseGridPanel extends JPanel {
         int clkY = logicY + logicH - 8;
         segs.add(new WireGraph.Seg(CLK_TRUNK_X, clkY, LOGIC_X, clkY));
 
-        int trunkX  = TRI_RIGHT + 6 + macro * 2;
+        int trunkX   = IO_PIN_PAD_CX - 4 - macro * 2;
         int channelY = 10 + macro * 6;
-        int trueCol = 24 + macro * 2;
-        int compCol = trueCol + 1;
-        int trueX   = COL_OFFSET + trueCol * CELL;
-        int compX   = COL_OFFSET + compCol * CELL;
-        int midX    = (trueX + compX) / 2;
-        int splitY  = channelY - 5;
-        int bubY    = splitY - bub - 1;
+        int stemX    = InputStrip.stemXOfInput(macro);
 
+        segs.add(new WireGraph.Seg(IO_PIN_PAD_CX, midY, trunkX, midY));
         segs.add(new WireGraph.Seg(trunkX, midY, trunkX, channelY));
-        segs.add(new WireGraph.Seg(midX, channelY, trunkX, channelY));
-        segs.add(new WireGraph.Seg(midX, channelY, midX, splitY));
-        segs.add(new WireGraph.Seg(trueX, splitY, compX, splitY));
-        segs.add(new WireGraph.Seg(trueX, splitY, trueX, 0));
-        segs.add(new WireGraph.Seg(compX, splitY, compX, bubY + bub));
-        segs.add(new WireGraph.Seg(compX, bubY, compX, 0));
+        segs.add(new WireGraph.Seg(trunkX, channelY, stemX, channelY));
+        segs.add(new WireGraph.Seg(stemX, channelY, stemX, 0));
     }
 
     private static void drawCenteredMultiline(Graphics2D g, String text, int cx, int cy) {
